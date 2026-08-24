@@ -1,0 +1,140 @@
+{
+ "testdata/printings/warp_world__10e.jpg": {
+  "name": "Warp World",
+  "set": "10E",
+  "number": "248",
+  "released": "2007-07-13"
+ },
+ "testdata/printings/wrath_of_god__10e.jpg": {
+  "name": "Wrath of God",
+  "set": "10E",
+  "number": "61",
+  "released": "2007-07-13"
+ },
+ "testdata/printings/lightning_bolt__m10.jpg": {
+  "name": "Lightning Bolt",
+  "set": "M10",
+  "number": "146",
+  "released": "2009-07-17"
+ },
+ "testdata/printings/lightning_bolt__a25.jpg": {
+  "name": "Lightning Bolt",
+  "set": "A25",
+  "number": "141",
+  "released": "2018-03-16"
+ },
+ "testdata/printings/counterspell__7ed.jpg": {
+  "name": "Counterspell",
+  "set": "7ED",
+  "number": "67",
+  "released": "2001-04-11"
+ },
+ "testdata/printings/counterspell__mh2.jpg": {
+  "name": "Counterspell",
+  "set": "MH2",
+  "number": "267",
+  "released": "2021-06-18"
+ },
+ "testdata/printings/llanowar_elves__9ed.jpg": {
+  "name": "Llanowar Elves",
+  "set": "9ED",
+  "number": "253",
+  "released": "2005-07-29"
+ },
+ "testdata/printings/llanowar_elves__dom.jpg": {
+  "name": "Llanowar Elves",
+  "set": "DOM",
+  "number": "168",
+  "released": "2018-04-27"
+ },
+ "testdata/printings/birds_of_paradise__7ed.jpg": {
+  "name": "Birds of Paradise",
+  "set": "7ED",
+  "number": "231",
+  "released": "2001-04-11"
+ },
+ "testdata/printings/birds_of_paradise__m12.jpg": {
+  "name": "Birds of Paradise",
+  "set": "M12",
+  "number": "165",
+  "released": "2011-07-15"
+ },
+ "testdata/printings/giant_growth__8ed.jpg": {
+  "name": "Giant Growth",
+  "set": "8ED",
+  "number": "254",
+  "released": "2003-07-28"
+ },
+ "testdata/printings/dark_ritual__5ed.jpg": {
+  "name": "Dark Ritual",
+  "set": "5ED",
+  "number": "153",
+  "released": "1997-03-24"
+ },
+ "testdata/printings/shivan_dragon__4ed.jpg": {
+  "name": "Shivan Dragon",
+  "set": "4ED",
+  "number": "220",
+  "released": "1995-04-01"
+ },
+ "testdata/printings/sol_ring__c21.jpg": {
+  "name": "Sol Ring",
+  "set": "C21",
+  "number": "263",
+  "released": "2021-04-23"
+ },
+ "testdata/printings/path_to_exile__2xm.jpg": {
+  "name": "Path to Exile",
+  "set": "2XM",
+  "number": "25",
+  "released": "2020-08-07"
+ },
+ "testdata/printings/thoughtseize__ths.jpg": {
+  "name": "Thoughtseize",
+  "set": "THS",
+  "number": "107",
+  "released": "2013-09-27"
+ },
+ "testdata/printings/rhystic_study__pcy.jpg": {
+  "name": "Rhystic Study",
+  "set": "PCY",
+  "number": "45",
+  "released": "2000-06-05"
+ },
+ "testdata/printings/doom_blade__m10.jpg": {
+  "name": "Doom Blade",
+  "set": "M10",
+  "number": "93",
+  "released": "2009-07-17"
+ },
+ "testdata/printings/cultivate__m11.jpg": {
+  "name": "Cultivate",
+  "set": "M11",
+  "number": "168",
+  "released": "2010-07-16"
+ },
+ "testdata/printings/ponder__m12.jpg": {
+  "name": "Ponder",
+  "set": "M12",
+  "number": "73",
+  "released": "2011-07-15"
+ },
+ "testdata/printings/mana_leak__m12.jpg": {
+  "name": "Mana Leak",
+  "set": "M12",
+  "number": "63",
+  "released": "2011-07-15"
+ },
+ "testdata/printings/duress__7ed.jpg": {
+  "name": "Duress",
+  "set": "7ED",
+  "number": "131",
+  "released": "2001-04-11"
+ },
+ "testdata/printings/serra_angel__10e.jpg": {
+  "name": "Serra Angel",
+  "set": "10E",
+  "number": "39",
+  "released": "2007-07-13"
+ }
+}

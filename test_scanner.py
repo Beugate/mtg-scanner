@@ -78,8 +78,47 @@ def run(label, truth, ident):
     return correct, wrong, len(truth)
 
 
+def run_printings(ident):
+    """Does it report the printing being held, rather than the oldest one?
+
+    Every image in this set is a reprint, so a scanner that always reported the
+    original printing scores zero. Three outcomes are distinguished, because
+    they are not equally bad: the right set, an unreadable set line (which
+    falls back to the original and says so), and a wrong set stated as fact.
+    Only the last one is a failure.
+    """
+    path = HERE / "testdata" / "printings" / "truth.json"
+    if not path.exists():
+        print("printings: no images, skipped")
+        return 0, 0, 0
+    truth = json.loads(path.read_text(encoding="utf-8"))
+
+    correct = wrong = 0
+    for filename, want in truth.items():
+        frame = cv2.imread(str(HERE / filename))
+        if frame is None:
+            print(f"  ?? missing image {filename}")
+            continue
+        result = ident.identify(frame)
+        if result is None or result.name != want["name"]:
+            got = result.name if result else "nothing"
+            print(f"  -- name not matched: {want['name']} -> {got}")
+        elif result.set_code == want["set"]:
+            correct += 1
+        elif not result.set_evidence:
+            print(f"  -- set line unreadable: {want['name']} "
+                  f"({want['set']}, {want['released'][:4]})")
+        else:
+            wrong += 1
+            print(f"  !! {want['name']}  {want['set']} -> {result.set_code}"
+                  f"   (evidence {result.set_evidence!r})")
+    print(f"printings: {correct}/{len(truth)} identified to the right set, "
+          f"{wrong} wrong")
+    return correct, wrong, len(truth)
+
+
 def main():
-    wanted = sys.argv[1:] or ["scans", "photos", "val", "multiface"]
+    wanted = sys.argv[1:] or ["scans", "photos", "val", "multiface", "printings"]
     ident = scanner.Identifier(scanner.Scryfall())
     print("Loading Scryfall card-name catalog...")
     ident.load_catalog()
@@ -89,7 +128,14 @@ def main():
     print(f"{len(ident.names):,} match keys ready\n")
 
     correct = wrong = total = 0
+    set_wrong = 0
     for name in wanted:
+        # Kept out of the totals below: this set measures which *printing* was
+        # reported, which is a different question from which card it is.
+        if name == "printings":
+            _, set_wrong, _ = run_printings(ident)
+            print()
+            continue
         c, w, t = run(name, load(name), ident)
         correct += c
         wrong += w
@@ -97,7 +143,7 @@ def main():
         print()
 
     print(f"TOTAL: {correct}/{total} correct, {wrong} wrong answers")
-    return 1 if wrong else 0
+    return 1 if (wrong or set_wrong) else 0
 
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 # MTG Card Scanner
 
 Hold a Magic: The Gathering card up to your webcam and get back its **name**,
-**mana cost**, **the set it came out in**, and its **current price**.
+**mana cost**, **which printing you are holding**, and that printing's
+**current price**.
 
 ```
 python mtg_scanner.py
@@ -61,15 +62,37 @@ The camera dropdown switches webcams without restarting. **Esc** quits.
    OCR'd in one call — each `pytesseract` call spawns a subprocess, so batching
    the twelve crops took a scan from ~20s down to ~2s.
 4. **Match** the resulting lines against every Scryfall card name with RapidFuzz.
-5. **Look up** every printing of the matched card, oldest first, and report the
-   original one.
+5. **Look up** every printing of the matched card, then work out which one is
+   actually in front of the camera from the small print along the bottom edge.
+   That line is a fraction of the height of the title, so it gets its own warp
+   of the source frame at 5x the canonical size — at the size the title is read
+   at, the type is below anything Tesseract can resolve.
 
 ### About the answers it gives
 
-The set shown is the card's **original** printing — the set it came out in — and
-the price is that printing's. If the collector line at the bottom of the card is
-legible, the specific printing you're holding is used instead. The panel notes
-which case applied and how many printings exist.
+The set and price shown are for **the printing you are holding**, read off the
+bottom edge of the card. Which signals are there to read depends on how old the
+frame is:
+
+| Printed since | Signal | Example |
+| --- | --- | --- |
+| 2014 (M15 frame) | set code beside the language | `2XM • EN` |
+| ~1998 | collector number and set size | `248/383` |
+| ~1995 | copyright year | `™ & © 1993-2007 Wizards of the Coast` |
+
+None of these is available everywhere, so all of them are scored together
+rather than trusted one at a time. A set code is close to decisive where it is
+printed at all; a collector number and set size together nearly so; either
+alone is only suggestive; and the year is far too coarse to decide anything on
+its own — every core set of an era shares a size, so `249` means M10 through
+M13 until the year picks one out. A printing has to clear a threshold *and*
+beat every other set before it is reported.
+
+When the evidence does not get there, the panel falls back to the card's
+original printing and says the set line was unreadable, rather than presenting
+the fallback as a finding. Cards printed before about 1998 carry no collector
+number at all, so they land here by design. This is the same instinct as the
+name matching below: no answer beats a confident wrong one.
 
 Matching is deliberately conservative: it would rather say *"no card
 recognised"* and let you rescan than give a confident wrong answer. Two rules do
@@ -87,7 +110,7 @@ python test_scanner.py           # all sets
 python test_scanner.py val       # just one
 ```
 
-Current results — 36/40 correct, **0 wrong answers**:
+Current results — 36/40 cards named correctly, **0 wrong answers**:
 
 | Set | What it is | Result |
 | --- | --- | --- |
@@ -99,6 +122,21 @@ Current results — 36/40 correct, **0 wrong answers**:
 The four `val` failures return "not recognised" rather than a wrong card. That
 set is deliberately harder than a real webcam session — cards as little as half
 the frame height, rotated up to 12°, at JPEG quality 72.
+
+`printings` is scored separately, because "which printing is this" is a
+different question from "which card is this". Every image in it is a reprint,
+so always reporting the original printing would score zero:
+
+| Result | Count |
+| --- | --- |
+| right set | 19/23 |
+| set line unreadable, fell back and said so | 3 |
+| **wrong set** | **0** |
+
+Two of the three fall-backs are a 1995 and a 1997 card, which print no
+collector number to read. Reading the set line costs roughly one extra second
+per scan — it is a second full-size OCR pass, and the two overlapping crops it
+uses are what keep the wrong-answer count at zero.
 
 ## Files
 

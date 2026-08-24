@@ -3,12 +3,13 @@
 MTG Card Scanner
 ================
 Point your PC's webcam at a Magic: The Gathering card and get back its
-name, mana cost, the set it came out in, and its current market price.
+name, mana cost, which printing it is, and that printing's market price.
 
 Pipeline:
     webcam frame -> quadrilateral card detection -> perspective warp
     -> OCR of the title bar (Tesseract) -> fuzzy match against Scryfall's
-    card-name catalog -> Scryfall lookup of every printing -> report.
+    card-name catalog -> Scryfall lookup of every printing -> OCR of the
+    set line to pick the one being held -> report.
 
 Usage:
     python mtg_scanner.py                 # GUI with live camera
@@ -88,6 +89,7 @@ class Scryfall:
         )
         self._last_call = 0.0
         self._lock = threading.Lock()
+        self._sets = None
 
     def _throttle(self):
         # Scryfall asks for no more than ~10 requests per second.
@@ -116,6 +118,32 @@ class Scryfall:
         data = self._get("/catalog/card-names")
         path.write_text(json.dumps(data), encoding="utf-8")
         return data["data"]
+
+    def set_index(self, max_age_days=7):
+        """Set code -> set object, cached on disk and in memory.
+
+        Wanted for `printed_size`: the total a card prints beside its collector
+        number ("248/383") is the size of the set as it was *printed*, which
+        drifts from Scryfall's card_count once tokens and promos are counted.
+        """
+        if self._sets is not None:
+            return self._sets
+        path = CACHE_DIR / "sets.json"
+        data = None
+        if path.exists() and (time.time() - path.stat().st_mtime) < max_age_days * 86400:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                data = None
+        if data is None:
+            try:
+                data = self._get("/sets")
+            except Exception:                        # offline: fall back to codes
+                data = None
+            if data:
+                path.write_text(json.dumps(data), encoding="utf-8")
+        self._sets = {s["code"].upper(): s for s in (data or {}).get("data", [])}
+        return self._sets
 
     def printings(self, exact_name, max_age_hours=12):
         """Every printing of a card, oldest first."""
@@ -283,22 +311,26 @@ def find_card_quad(frame):
     return quads[0] if quads else None
 
 
-def warp_card(frame, quad):
-    """Flatten a detected card to the canonical CARD_W x CARD_H portrait image.
+def warp_card(frame, quad, scale=1):
+    """Flatten a detected card to a CARD_W x CARD_H portrait image.
 
     Normalising to one fixed size is deliberate. Everything downstream -- the
     top-hat structuring element, the adaptive-threshold block size, the OCR
     upscale factor -- is tuned against text of a known height, and letting the
     warp size follow the camera detunes all of it at once.
+
+    `scale` multiplies that canonical size. Only the set line asks for it: the
+    printing details are set in type far smaller than the title, and at scale 1
+    they land under Tesseract's floor no matter how good the camera is. Warping
+    the source frame again at 3x keeps those pixels instead of upscaling a crop
+    that has already been thrown away.
     """
-    dst = np.array(
-        [[0, 0], [CARD_W - 1, 0], [CARD_W - 1, CARD_H - 1], [0, CARD_H - 1]], "float32"
-    )
-    return cv2.warpPerspective(frame, cv2.getPerspectiveTransform(quad, dst),
-                               (CARD_W, CARD_H))
+    w, h = CARD_W * scale, CARD_H * scale
+    dst = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], "float32")
+    return cv2.warpPerspective(frame, cv2.getPerspectiveTransform(quad, dst), (w, h))
 
 
-def fit_whole(frame):
+def fit_whole(frame, scale=1):
     """Fallback: treat the centre of the frame as though it were the card."""
     h, w = frame.shape[:2]
     if w / h > CARD_RATIO:                  # too wide -> crop the sides
@@ -309,7 +341,8 @@ def fit_whole(frame):
         new_h = int(w / CARD_RATIO)
         y0 = (h - new_h) // 2
         crop = frame[y0:y0 + new_h, :]
-    return cv2.resize(crop, (CARD_W, CARD_H), interpolation=cv2.INTER_CUBIC)
+    return cv2.resize(crop, (CARD_W * scale, CARD_H * scale),
+                      interpolation=cv2.INTER_CUBIC)
 
 
 # --------------------------------------------------------------------------
@@ -402,19 +435,121 @@ def ocr_title(card_img):
     return out
 
 
-def ocr_set_code(card_img):
-    """Try to read the 3-4 letter set code from the bottom-left of a modern card."""
+# The bottom info line is the only place a card states which printing it is.
+# Where it sits moved with the frame: M15 (2014) and later print the collector
+# number, set code and language on two small lines under the text box, while
+# every frame before that tucks the number onto the end of the copyright line.
+# Sweep both bands rather than trying to guess the frame first.
+SET_LINE_BANDS = ((0.940, 0.992), (0.895, 0.992))
+
+# How much larger than the canonical warp to re-cut the card for this one read.
+SET_LINE_SCALE = 5
+
+# How many framings of the card to try before giving up on the set line.
+SET_LINE_VIEWS = 3
+
+# Otsu carries the ordinary white-on-dark line; top-hat rescues it where the
+# art behind it is bright and busy; adaptive copes with an uneven exposure.
+SET_LINE_KINDS = ("otsu", "tophat", "adaptive")
+
+# Tokens that turn up in the bottom line and are not set codes.
+_NOT_SET_CODES = {"EN", "DE", "FR", "IT", "JP", "ES", "PT", "RU", "KR", "CN",
+                  "NM", "TM", "LLC", "INC", "THE", "OF", "AND", "ALL", "ILLUS",
+                  "WIZARDS", "COAST", "RIGHTS", "RESERVED"}
+
+# M15 and later print "<set> * <language>" under the text box. Anchoring on
+# the language is what separates the set code from surrounding OCR debris.
+_CODE_BESIDE_LANGUAGE = (r"\b([A-Z0-9]{3,5})\s*[^A-Z0-9\s]{0,2}\s*"
+                         r"(?:EN|DE|FR|IT|ES|PT|JA|JP|KO|RU|ZH|ZHS|ZHT)\b")
+
+# Tesseract renders the slash of "248/383" as almost any thin glyph, and on a
+# busy background drops it altogether.
+_SLASH = r"[/\|1lI:;,.·• ]"
+
+
+@dataclass
+class SetLine:
+    """Candidate readings of a card's bottom info line.
+
+    Every field is a tuple of possibilities rather than one value, because the
+    line is small enough that several binarisations disagree about it. Sorting
+    out which reading is real is pick_printing's job -- it has the actual list
+    of printings to check them against, which this does not.
+    """
+    codes: tuple = ()        # 3-5 char set codes; modern frames only
+    numbers: tuple = ()      # (collector number, printed set size) pairs
+    years: tuple = ()        # copyright years; the last one is the print year
+
+
+def parse_set_line(text):
+    """Pull set codes, collector numbers and copyright years from an OCR read."""
+    up = re.sub(r"\s+", " ", text.upper())
+    years = tuple(int(y) for y in re.findall(r"(?:19|20)\d{2}", up))
+
+    # A set code counts only where the frame prints it beside the language,
+    # "2XM * EN". Any bare three-letter token would otherwise be enough to pick
+    # a printing on its own, and OCR turns artist names and the copyright line
+    # into plenty of those -- several of which are real set codes.
+    codes = tuple(t for t in re.findall(_CODE_BESIDE_LANGUAGE, up)
+                  if t not in _NOT_SET_CODES and not t.isdigit())
+
+    numbers = []
+    for a, b in re.findall(r"(\d{1,4})\s*" + _SLASH + r"\s*(\d{2,4})", up):
+        n, t = int(a), int(b)
+        if n in years and t in years:
+            continue                     # a copyright range, "1993-2007"
+        numbers.append((n, t))
+
+    # The eaten-slash case: "248/383" comes back as one run of digits. Offer
+    # every split; only one an actual printing agrees with will ever score.
+    # Years go first so "1993-2007" cannot masquerade as a collector number.
+    for run in re.findall(r"\d{5,8}", re.sub(r"(?:19|20)\d{2}", " ", up)):
+        for cut in range(1, len(run) - 1):
+            n, t = int(run[:cut]), int(run[cut:])
+            if t >= 20:
+                numbers.append((n, t))
+
+    return SetLine(codes, tuple(numbers), years)
+
+
+def read_set_line(card_img):
+    """OCR the bottom info line of a warped card, whichever frame it uses.
+
+    Both bands and every preprocessing go into a single contact sheet, for the
+    same reason ocr_title uses one: each pytesseract call spawns a subprocess,
+    and six of those per candidate framing costs more than the whole rest of
+    the scan put together.
+
+    Each output line is parsed on its own so that readings cannot contaminate
+    each other -- a year lifted off one tile must not pair up with digits from
+    the next.
+    """
     h, w = card_img.shape[:2]
-    crop = card_img[int(h * 0.915):int(h * 0.960), int(w * 0.045):int(w * 0.400)]
-    for kind in ("otsu", "adaptive"):
-        try:
-            raw = pytesseract.image_to_string(_prep(crop, kind), config="--psm 7")
-        except Exception:
+    tiles = []
+    for top, bottom in SET_LINE_BANDS:
+        crop = card_img[int(h * top):int(h * bottom), 0:w]
+        if crop.size == 0:
             continue
-        for tok in re.findall(r"[A-Z0-9]{3,5}", raw.upper()):
-            if tok not in {"EN", "NM", "TM"}:
-                return tok
-    return None
+        for kind in SET_LINE_KINDS:
+            tile = _prep(crop, kind, scale=1)
+            if tile.mean() < 127:            # keep the sheet dark-on-light
+                tile = cv2.bitwise_not(tile)
+            tiles.append(tile)
+            tiles.append(np.full((60, tile.shape[1]), 255, np.uint8))
+    if not tiles:
+        return SetLine()
+    try:
+        raw = pytesseract.image_to_string(np.vstack(tiles), config="--psm 6")
+    except Exception:
+        return SetLine()
+
+    codes, numbers, years = [], [], []
+    for line in raw.splitlines():
+        got = parse_set_line(line)
+        codes.extend(got.codes)
+        numbers.extend(got.numbers)
+        years.extend(got.years)
+    return SetLine(tuple(codes), tuple(numbers), tuple(years))
 
 
 # --------------------------------------------------------------------------
@@ -436,6 +571,7 @@ class ScanResult:
     original_set: str
     printings: int
     card: dict
+    set_evidence: str = ""      # what identified the printing; "" == unreadable
 
 
 def mana_cost_of(card):
@@ -452,6 +588,121 @@ _PUNCT = re.compile(r"[^a-z]")
 def _compact(text):
     """Lowercase, letters only -- for comparisons that ignore spacing."""
     return _PUNCT.sub("", text.lower())
+
+
+# How much each thing the bottom line can tell us is worth. The set code is
+# unambiguous where it is printed at all; a collector number and set size
+# together are nearly so; either alone is suggestive; and the copyright year
+# only ever separates printings that something else already narrowed down --
+# every core set of an era shares a size, so "249 cards" means M10 through M13
+# until the year picks one.
+SCORE_SET_CODE = 6
+SCORE_NUMBER_AND_SIZE = 5
+SCORE_NUMBER_ONLY = 2
+SCORE_SIZE_ONLY = 2
+SCORE_YEAR = 2
+
+# What the evidence has to add up to, and beat the next set by, before a
+# printing other than the original is reported. Deliberately strict, for the
+# same reason the name matching is: a wrong set stated confidently is worse
+# than falling back to the original and admitting the line was unreadable.
+PRINTING_MIN_SCORE = 4
+PRINTING_MIN_MARGIN = 2
+
+
+def _printed_size(set_obj):
+    """How many cards the set says it has *on the card*, not in Scryfall."""
+    return set_obj.get("printed_size") or set_obj.get("card_count") or 0
+
+
+def pick_printing(prints, line, sets):
+    """Which printing was scanned, and the evidence for saying so.
+
+    Returns (card, evidence). Evidence is a short string naming what agreed, or
+    "" when the bottom line could not be read well enough to tell -- in which
+    case the caller gets the oldest printing and should say so, rather than
+    presenting a guess as a fact.
+
+    Scores rather than matching on one field because no single field is
+    available across all frames: only M15 (2014) and later print a set code,
+    the collector number goes back to 1998, and the copyright year is on
+    everything but is far too coarse to decide on alone.
+    """
+    if len(prints) == 1:
+        return prints[0], "only printing"
+    if not (line.codes or line.numbers or line.years):
+        return prints[0], ""
+
+    year = max(line.years) if line.years else 0
+    scored = []
+    for p in prints:
+        code = (p.get("set") or "").upper()
+        size = _printed_size(sets.get(code, {}))
+        digits = re.sub(r"\D", "", p.get("collector_number") or "")
+        num = int(digits) if digits else 0
+        released = (p.get("released_at") or "")[:4]
+
+        score, why = 0, []
+        if code and code in line.codes:
+            score += SCORE_SET_CODE
+            why.append(code)
+        if num and size and (num, size) in line.numbers:
+            score += SCORE_NUMBER_AND_SIZE         # the whole "248/383" agrees
+            why.append("%d/%d" % (num, size))
+        elif num and any(n == num for n, _ in line.numbers):
+            score += SCORE_NUMBER_ONLY
+            why.append("#%d" % num)
+        elif size and any(t == size for _, t in line.numbers):
+            score += SCORE_SIZE_ONLY
+            why.append("?/%d" % size)
+        if year and released == str(year):
+            score += SCORE_YEAR
+            why.append(released)
+        scored.append((score, p, ", ".join(why)))
+
+    scored.sort(key=lambda s: -s[0])
+    top, card, why = scored[0]
+
+    # The runner-up that matters is the best-scoring *other set*. Scryfall
+    # lists a set several times over -- foil, alternate frame, promo -- and
+    # those entries score identically because they share a collector number
+    # and a release date. Two of them tying says nothing about which set is
+    # being held, and treating it as an ambiguity throws the answer away.
+    top_code = (card.get("set") or "").upper()
+    runner_up = next((score for score, p, _ in scored
+                      if (p.get("set") or "").upper() != top_code), 0)
+
+    if top >= PRINTING_MIN_SCORE and top - runner_up >= PRINTING_MIN_MARGIN:
+        return card, why
+    return prints[0], ""
+
+
+class _View:
+    """One flattened reading of the frame, re-cuttable at a higher resolution.
+
+    Keeping the quad instead of just the warped image is what lets the set line
+    be read at SET_LINE_SCALE afterwards, without paying to warp every
+    candidate at that size up front when all but one get discarded.
+    """
+
+    def __init__(self, frame, quad, flipped=False):
+        self.frame = frame
+        self.quad = quad                       # None -> the centre-crop fallback
+        self.flipped = flipped
+        self._cache = {}
+
+    def image(self, scale=1):
+        img = self._cache.get(scale)
+        if img is None:
+            img = (warp_card(self.frame, self.quad, scale) if self.quad is not None
+                   else fit_whole(self.frame, scale))
+            if self.flipped:
+                img = cv2.rotate(img, cv2.ROTATE_180)
+            self._cache[scale] = img
+        return img
+
+    def upside_down(self):
+        return _View(self.frame, self.quad, not self.flipped)
 
 
 class Identifier:
@@ -567,40 +818,54 @@ class Identifier:
                 break
         return best
 
+    def _resolve_printing(self, prints, winner, views):
+        """Work out which printing is being held, trying each framing in turn.
+
+        Quad detection is tuned to find the *name*, and a quad landing slightly
+        inside the card border still reads that perfectly while cutting off the
+        bottom line, which sits within a few percent of the edge. So when the
+        view that won the title yields no answer, fall back through the other
+        framings rather than concluding the card does not say.
+
+        A framing counts as settled only once the reading actually resolves to
+        a printing. Stopping as soon as any digits come back would let the
+        splitting guesswork in parse_set_line end the search with noise.
+        """
+        ordered = [winner] + [v for v in views if v is not winner]
+        sets = self.sf.set_index()
+        for view in ordered[:SET_LINE_VIEWS]:
+            chosen, evidence = pick_printing(
+                prints, read_set_line(view.image(SET_LINE_SCALE)), sets)
+            if evidence:
+                return chosen, evidence
+        return prints[0], ""
+
     def identify(self, frame):
         """Run the full pipeline on a single BGR frame."""
-        candidates = [warp_card(frame, q) for q in find_card_quads(frame)]
-        candidates.append(fit_whole(frame))     # last resort: assume it fills the frame
+        views = [_View(frame, q) for q in find_card_quads(frame)]
+        views.append(_View(frame, None))        # last resort: assume it fills the frame
 
         # Upright first for every candidate, then a second sweep upside down:
         # cards are almost always held the right way up, and each OCR pass is
         # the expensive part, so do not pay for rotation until it is needed.
-        upright = list(candidates)
-        flipped = [cv2.rotate(c, cv2.ROTATE_180) for c in candidates]
-
-        best = None            # (score, name, card_img, ocr_text)
-        for img in upright + flipped:
-            for text in ocr_title(img):
+        best = None            # (score, name, view, ocr_text)
+        for view in views + [v.upside_down() for v in views]:
+            for text in ocr_title(view.image()):
                 m = self.match_name(text)
                 if m and (best is None or m[1] > best[0]):
-                    best = (m[1], m[0], img, text)
+                    best = (m[1], m[0], view, text)
             if best and best[0] >= self.CONFIDENT:
                 break                              # confident enough, stop
         if best is None:
             return None
 
-        score, name, card_img, ocr_text = best
+        score, name, view, ocr_text = best
         prints = self.sf.printings(name)
         if not prints:
             return None
 
-        chosen = prints[0]          # oldest printing == the set it came out in
-        code = ocr_set_code(card_img)
-        if code:
-            for p in prints:
-                if p.get("set", "").upper() == code:
-                    chosen = p
-                    break
+        # Which printing is in front of the camera, not which came first.
+        chosen, evidence = self._resolve_printing(prints, view, views)
 
         return ScanResult(
             name=chosen.get("name", name),
@@ -617,6 +882,7 @@ class Identifier:
             original_set=prints[0].get("set_name", "?"),
             printings=len(prints),
             card=chosen,
+            set_evidence=evidence,
         )
 
 
@@ -886,7 +1152,10 @@ class ScannerApp:
         note = (f"OCR read \u201c{r.ocr_text}\u201d \u00b7 match {r.confidence}% "
                 f"\u00b7 {r.printings} printing(s)")
         if r.printings > 1:
-            note += f"\nShowing the original printing ({r.original_set})."
+            note += (f"\nPrinting read off the card ({r.set_evidence})."
+                     if r.set_evidence else
+                     "\nCould not read the set line \u2014 showing the original "
+                     f"printing ({r.original_set}).")
         self.footer.config(text=note)
 
         if img_path and Path(img_path).exists():
@@ -933,6 +1202,10 @@ def run_cli(image_path):
     print(f"  Rarity     : {r.rarity.title()}  #{r.collector_number}")
     for label, value in format_prices(r.prices):
         print(f"  {label:<11}: {value}")
+    if r.printings > 1:
+        print(f"  Printing   : "
+              + (f"read off the card ({r.set_evidence})" if r.set_evidence
+                 else f"UNREADABLE - showing the original ({r.original_set})"))
     print(f"  Scryfall   : {r.scryfall_uri}")
     print(f"  [OCR read '{r.ocr_text}', match {r.confidence}%, {r.printings} printings]")
     return 0
