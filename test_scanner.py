@@ -100,9 +100,15 @@ def run_printings(ident):
             print(f"  ?? missing image {filename}")
             continue
         result = ident.identify(frame)
-        if result is None or result.name != want["name"]:
-            got = result.name if result else "nothing"
-            print(f"  -- name not matched: {want['name']} -> {got}")
+        if result is None:
+            print(f"  -- not recognised: {want['name']}")
+        elif result.name != want["name"]:
+            # A wrong *name* here is the same failure run() counts, and it has
+            # to be counted: these images never pass through run(), so a wrong
+            # card named from this set would otherwise never fail the suite.
+            wrong += 1
+            print(f"  !! {want['name']}  ->  {result.name}"
+                  f"   (read {result.ocr_text!r}, match {result.confidence}%)")
         elif result.set_code == want["set"]:
             correct += 1
         elif not result.set_evidence:

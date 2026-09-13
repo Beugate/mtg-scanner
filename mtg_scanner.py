@@ -706,7 +706,14 @@ class _View:
 
 
 class Identifier:
-    MATCH_CUTOFF = 78      # below this, treat the read as unrecognised
+    # Below this, treat the read as unrecognised. 82 rather than something
+    # looser because a title the preprocessings cannot resolve at all still
+    # emits noise lines, and a long enough one lands in the high 70s against
+    # some real card by chance: a Prophecy-frame Rhystic Study reads as
+    # "PRESSION GRASSY", which is a 80% match for "Suppression Ray". Measured
+    # over testdata/, every genuine match scores 83 or better, so the window
+    # between the two is where the cutoff belongs.
+    MATCH_CUTOFF = 82
     CONFIDENT = 90         # at or above this, stop looking for a better read
 
     def __init__(self, scryfall):
